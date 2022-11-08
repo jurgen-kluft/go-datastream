@@ -40,14 +40,17 @@ func (d *DataBlock) WriteInt8(i int8) {
 }
 
 func (d *DataBlock) WriteInt16(i int16) {
+	// TODO make sure to align
 	binary.Write(d.Writer, d.Endian, i)
 }
 
 func (d *DataBlock) WriteInt32(i int32) {
+	// TODO make sure to align
 	binary.Write(d.Writer, d.Endian, i)
 }
 
 func (d *DataBlock) WriteInt64(i int64) {
+	// TODO make sure to align
 	binary.Write(d.Writer, d.Endian, i)
 }
 
@@ -56,26 +59,32 @@ func (d *DataBlock) WriteUInt8(i uint8) {
 }
 
 func (d *DataBlock) WriteUInt16(i uint16) {
+	// TODO make sure to align
 	binary.Write(d.Writer, d.Endian, i)
 }
 
 func (d *DataBlock) WriteUInt32(i uint32) {
+	// TODO make sure to align
 	binary.Write(d.Writer, d.Endian, i)
 }
 
 func (d *DataBlock) WriteUInt64(i uint64) {
+	// TODO make sure to align
 	binary.Write(d.Writer, d.Endian, i)
 }
 
 func (d *DataBlock) WriteFloat(f float32) {
+	// TODO make sure to align
 	binary.Write(d.Writer, d.Endian, f)
 }
 
 func (d *DataBlock) WriteDouble(f float64) {
+	// TODO make sure to align
 	binary.Write(d.Writer, d.Endian, f)
 }
 
 func (d *DataBlock) WritePtr(ptr *DataPtr) {
+	// TODO make sure to align
 	d.Pointers = append(d.Pointers, ptr)
 	binary.Write(d.Writer, d.Endian, ptr.Offset)
 }
