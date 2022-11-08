@@ -4,22 +4,39 @@ import (
 	"encoding/binary"
 )
 
-type DataStream struct {
-	Endian    binary.ByteOrder
-	Alignment int
-	Current   *DataBlock
-	Blocks    []*DataBlock
+type Stream struct {
+	Endian             binary.ByteOrder
+	Alignment          int
+	Current            *Block
+	Blocks             []*Block
+	GlobalPointerIndex int64
+}
+type Pointer struct {
+	Index  int64
+	Offset int64
 }
 
-func NewDataStream(alignment int, endian binary.ByteOrder) *DataStream {
-	return &DataStream{
+func NewStream(alignment int, endian binary.ByteOrder) *Stream {
+	str := &Stream{
 		Endian:    endian,
 		Alignment: alignment,
-		Current:   NewDataBlock(alignment, endian),
+		Current:   nil,
+		Blocks:    make([]*Block, 0),
+	}
+
+	return str
+}
+
+func (d *Stream) NewPtr() Pointer {
+	d.GlobalPointerIndex++
+	return Pointer{
+		Index:  d.GlobalPointerIndex,
+		Offset: -1,
 	}
 }
 
-func (d *DataStream) OpenBlock() *DataPtr {
-	// TODO Implement !
-	return nil
+func (d *Stream) NewBlock() *Block {
+	b := NewBlock(d.NewPtr(), d.Endian, d.Alignment)
+	d.Blocks = append(d.Blocks, b)
+	return b
 }
