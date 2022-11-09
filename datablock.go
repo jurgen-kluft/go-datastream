@@ -3,6 +3,7 @@ package datastream
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"math"
 )
 
@@ -27,6 +28,16 @@ func NewBlock(ptr Pointer, endian binary.ByteOrder, alignment int) *Block {
 		PutBuffer: make([]byte, 16),
 		Writer:    new(bytes.Buffer),
 		Pointers:  make([]Pointer, 0),
+	}
+}
+
+func (d *Block) WriteTo(w io.Writer) {
+	w.Write(d.Writer.Bytes())
+}
+
+func (d *Block) Finalize(fn func(ptr Pointer) Pointer) {
+	for i, _ := range d.Pointers {
+		d.Pointers[i] = fn(d.Pointers[i])
 	}
 }
 
