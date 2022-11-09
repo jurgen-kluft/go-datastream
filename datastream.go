@@ -3,83 +3,144 @@ package datastream
 import (
 	"encoding/binary"
 	"os"
+	"sort"
 )
 
 type Stream struct {
-	Endian    binary.ByteOrder
-	Alignment int
-	Root      *Block
-	Current   *Block
-	Blocks    []*Block
+	Endian        binary.ByteOrder
+	DataFilename  string
+	RelocFilename string
+	Alignment     int
+	Root          *Block
+	Current       *Block
+	Stack         []*Block
+	Blocks        []*Block
 }
+
 type Pointer struct {
 	Index  int
 	Offset int64
 }
 
-func NewStream(endian binary.ByteOrder) *Stream {
+func NewStream(endian binary.ByteOrder, dataFilename string, relocFilename string) *Stream {
 	str := &Stream{
-		Endian:    endian,
-		Alignment: 8, // our largest type is 8 bytes
-		Current:   nil,
-		Root:      nil,
-		Blocks:    make([]*Block, 0),
+		Endian:        endian,
+		DataFilename:  dataFilename,
+		RelocFilename: relocFilename,
+		Alignment:     8, // our largest type is 8 bytes
+		Current:       nil,
+		Root:          nil,
+		Blocks:        make([]*Block, 0),
 	}
 
-	str.Root = str.NewBlock()
-	str.Current = str.Root
+	str.OpenBlock()
+	str.Root = str.Blocks[0]
+	str.Current = str.Blocks[0]
 	return str
 }
 
-func (d *Stream) NewBlock() *Block {
+func (d *Stream) OpenBlock() Pointer {
 	b := NewBlock(Pointer{Index: len(d.Blocks), Offset: -1}, d.Endian, d.Alignment)
 	d.Blocks = append(d.Blocks, b)
-	return b
+	return b.This
 }
 
-// Finalize, write out the stream to a file.
-// To do that we need to 'resolve' all the pointers.
-// Write the list of pointers into a separate file.
+func (d *Stream) CloseBlock() {
+	d.Current.close()
+	d.Current = d.Stack[len(d.Stack)-1]
+	d.Stack = d.Stack[:len(d.Stack)-1]
+}
+
+func (d *Stream) WriteString(s string) {
+	d.Current.writeString(s)
+}
+
+func (d *Stream) WriteInt8(i int8) {
+	d.Current.writeInt8(i)
+}
+
+func (d *Stream) WriteInt16(i int16) {
+	d.Current.writeInt16(i)
+}
+
+func (d *Stream) WriteInt32(i int32) {
+	d.Current.writeInt32(i)
+}
+
+func (d *Stream) WriteInt64(i int64) {
+	d.Current.writeInt64(i)
+}
+
+func (d *Stream) WriteUInt8(i uint8) {
+	d.Current.writeUInt8(i)
+}
+
+func (d *Stream) WriteUInt16(i uint16) {
+	d.Current.writeUInt16(i)
+}
+
+func (d *Stream) WriteUInt32(i uint32) {
+	d.Current.writeUInt32(i)
+}
+
+func (d *Stream) WriteUInt64(i uint64) {
+	d.Current.writeUInt64(i)
+}
+
+func (d *Stream) WriteFloat(f float32) {
+	d.Current.writeFloat(f)
+}
+
+func (d *Stream) WriteDouble(f float64) {
+	d.Current.writeDouble(f)
+}
+
+func (d *Stream) WritePtr(ptr Pointer) {
+	d.Current.writePtr(ptr)
+}
+
+// Finalize will write out a finalized stream to disk
 func (d *Stream) Finalize() error {
-	// keep track of all unique pointers
-	pointers := make(map[Pointer]bool)
 
 	// resolve all the pointers
-	offset := int64(0)
+	pointers := make(map[int]int64)
+	goffset := int64(0) // global offset
 	for _, block := range d.Blocks {
-		block.This.Offset = offset
-		block.Finalize(func(ptr Pointer) Pointer {
-			pointers[ptr] = true
-			ptr.Offset += block.This.Offset
-			return ptr
-		})
-		offset += block.Size
-	}
-
-	// write all blocks to a single file
-	// write all pointers to a single file
-
-	// open new file
-	file, err := os.Create("datastream.bin")
-	defer file.Close()
-	if err != nil {
-		return err
+		block.This.Offset = goffset
+		block.finalize(goffset, pointers)
+		goffset += block.Size
 	}
 
 	// write all blocks
-	for _, block := range d.Blocks {
-		block.WriteTo(file)
-	}
-
-	// write all pointers
-	ptrs, err := os.Create("datastream.ptrs")
-	defer ptrs.Close()
+	datafile, err := os.Create(d.DataFilename)
+	defer datafile.Close()
 	if err != nil {
 		return err
 	}
 
-	for ptr, _ := range pointers {
-		binary.Write(ptrs, d.Endian, ptr.Offset)
+	for _, block := range d.Blocks {
+		block.writeTo(datafile)
+	}
+
+	// write all pointers
+	relocfile, err := os.Create(d.RelocFilename)
+	defer relocfile.Close()
+	if err != nil {
+		return err
+	}
+
+	ptroffsets := make([]int64, len(pointers))
+	for _, o := range pointers {
+		ptroffsets = append(ptroffsets, o)
+	}
+
+	// sort the ptroffsets
+	sort.Slice(ptroffsets, func(i, j int) bool {
+		return ptroffsets[i] < ptroffsets[j]
+	})
+
+	for _, o := range ptroffsets {
+		binary.Write(relocfile, d.Endian, o)
 	}
 
 	return nil
