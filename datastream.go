@@ -53,6 +53,18 @@ func (d *Stream) CloseBlock() {
 	d.Current = d.Stack[len(d.Stack)-1]
 }
 
+func (d *Stream) Align2() {
+	d.Current.align(2)
+}
+
+func (d *Stream) Align4() {
+	d.Current.align(4)
+}
+
+func (d *Stream) Align8() {
+	d.Current.align(8)
+}
+
 func (d *Stream) WriteString(s string) {
 	d.Current.writeString(s)
 }

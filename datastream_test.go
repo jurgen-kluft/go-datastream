@@ -54,7 +54,9 @@ func TestOpenCloseBlock(t *testing.T) {
 func TestWriteMethods(t *testing.T) {
 	stream := NewStream(binary.LittleEndian)
 	stream.WriteI8(42)
+	stream.Align2() // you need to align manually
 	stream.WriteU16(0x1234)
+	stream.Align4()
 	stream.WriteString("test")
 	data := stream.Current.Writer.Bytes()
 	// I8: 42
@@ -72,6 +74,7 @@ func TestFinalize(t *testing.T) {
 	ptr := stream.OpenBlock()
 	stream.WriteI8(2)
 	stream.CloseBlock()
+	stream.Align8()      // align before writing pointer
 	stream.WritePtr(ptr) // ptr to the second block
 
 	// Create temp files
