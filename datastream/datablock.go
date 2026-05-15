@@ -11,26 +11,28 @@ import (
 // TODO going through bytes.Buffer and binary.Write is not the most efficient way to do this.
 
 type Block struct {
-	This      Pointer
-	Canonical int
-	Size      int64
-	Endian    binary.ByteOrder
-	Alignment int
-	PutBuffer []byte
-	Writer    *bytes.Buffer
-	Pointers  []Pointer
+	This          Pointer
+	SizeOfPointer SizeOfPointer
+	Canonical     int
+	Size          int64
+	Endian        binary.ByteOrder
+	Alignment     int
+	PutBuffer     []byte
+	Writer        *bytes.Buffer
+	Pointers      []Pointer
 }
 
-func NewBlock(ptr Pointer, endian binary.ByteOrder, alignment int) *Block {
+func NewBlock(ptr Pointer, sizeOfPointer SizeOfPointer, endian binary.ByteOrder, alignment int) *Block {
 	return &Block{
-		This:      ptr,
-		Canonical: -1,
-		Size:      0,
-		Endian:    endian,
-		Alignment: alignment,
-		PutBuffer: make([]byte, 16),
-		Writer:    new(bytes.Buffer),
-		Pointers:  make([]Pointer, 0),
+		This:          ptr,
+		SizeOfPointer: sizeOfPointer,
+		Canonical:     -1,
+		Size:          0,
+		Endian:        endian,
+		Alignment:     alignment,
+		PutBuffer:     make([]byte, 16),
+		Writer:        new(bytes.Buffer),
+		Pointers:      make([]Pointer, 0),
 	}
 }
 
@@ -38,15 +40,15 @@ func (d *Block) writeTo(w io.Writer) {
 	w.Write(d.Writer.Bytes())
 }
 
-func (d *Block) finalize(offset int64, pointers map[int]int64, ptrOffsets []int64) (updatedPtrOffsetSets []int64) {
+func (d *Block) finalize(offset int64, pointers map[int]int64, pointerOffsets []int64) (updatedPointerOffsets []int64) {
 	// Register the pointers and update the stream
 	stream := d.Writer.Bytes()
 	for _, ptr := range d.Pointers {
-		o := offset + ptr.Offset
-		ptrOffsets = append(ptrOffsets, o)
-		d.Endian.PutUint64(stream[ptr.Offset:(ptr.Offset+8)], uint64(pointers[ptr.Index]))
+		o := offset + int64(ptr.Offset)
+		pointerOffsets = append(pointerOffsets, o)
+		d.Endian.PutUint32(stream[ptr.Offset:(ptr.Offset+4)], uint32(pointers[ptr.Index]))
 	}
-	return ptrOffsets
+	return pointerOffsets
 }
 
 func (d *Block) hash(hasher hash.Hash) [20]byte {
@@ -89,15 +91,6 @@ func (d *Block) align(alignment int) {
 		d.writeBytes(d.PutBuffer[:chunk])
 		gap -= chunk
 	}
-}
-
-func (d *Block) writeString(s string) {
-	strbytes := []byte(s)
-	strlen := len(strbytes)
-	d.Endian.PutUint32(d.PutBuffer, uint32(strlen))
-	d.writeBytes(d.PutBuffer[:4])
-	d.writeBytes(strbytes)
-	d.writeBytes([]byte{0}) // null terminator
 }
 
 func (d *Block) writeBytes(b []byte) {
@@ -153,6 +146,11 @@ func (d *Block) writeF64(f float64) {
 func (d *Block) writePtr(ptr Pointer) {
 	ptr.Offset = int64(d.Writer.Len())
 	d.Pointers = append(d.Pointers, ptr)
-	d.Endian.PutUint64(d.PutBuffer, uint64(ptr.Offset))
-	d.writeBytes(d.PutBuffer[:8])
+	if d.SizeOfPointer == SizeOfPointer32 {
+		d.Endian.PutUint32(d.PutBuffer, uint32(ptr.Offset))
+		d.writeBytes(d.PutBuffer[:4])
+	} else {
+		d.Endian.PutUint64(d.PutBuffer, uint64(ptr.Offset))
+		d.writeBytes(d.PutBuffer[:8])
+	}
 }

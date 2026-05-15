@@ -8,15 +8,12 @@ import (
 )
 
 func TestNewStream(t *testing.T) {
-	stream := NewStream(binary.LittleEndian)
+	stream := NewStream(SizeOfPointer64, binary.LittleEndian)
 	if stream.Endian != binary.LittleEndian {
 		t.Error("Expected LittleEndian")
 	}
 	if stream.Alignment != 8 {
 		t.Error("Expected alignment 8")
-	}
-	if stream.Root == nil {
-		t.Error("Expected Root not nil")
 	}
 	if stream.Current == nil {
 		t.Error("Expected Current not nil")
@@ -30,7 +27,7 @@ func TestNewStream(t *testing.T) {
 }
 
 func TestOpenCloseBlock(t *testing.T) {
-	stream := NewStream(binary.LittleEndian)
+	stream := NewStream(SizeOfPointer64, binary.LittleEndian)
 	initialCurrent := stream.Current
 	stream.OpenBlock()
 	if stream.Current == initialCurrent {
@@ -52,12 +49,15 @@ func TestOpenCloseBlock(t *testing.T) {
 }
 
 func TestWriteMethods(t *testing.T) {
-	stream := NewStream(binary.LittleEndian)
+	stream := NewStream(SizeOfPointer64, binary.LittleEndian)
 	stream.WriteI8(42)
 	stream.Align2() // you need to align manually
 	stream.WriteU16(0x1234)
 	stream.Align4()
-	stream.WriteString("test")
+	str := "test"
+	stream.WriteU32(uint32(len(str)))
+	stream.WriteBytes([]byte(str))
+	stream.WriteU8(0) // null terminator
 	data := stream.Current.Writer.Bytes()
 	// I8: 42
 	// U16 align 2: pos=1, gap=1, write 0, then 34 12
@@ -69,7 +69,7 @@ func TestWriteMethods(t *testing.T) {
 }
 
 func TestFinalize(t *testing.T) {
-	stream := NewStream(binary.LittleEndian)
+	stream := NewStream(SizeOfPointer64, binary.LittleEndian)
 	stream.WriteI8(1)
 	ptr := stream.OpenBlock()
 	stream.WriteI8(2)
@@ -90,16 +90,24 @@ func TestFinalize(t *testing.T) {
 	}
 	defer os.Remove(relocFile.Name())
 
-	err = stream.Finalize(dataFile.Name(), relocFile.Name())
+	err = stream.Finalize()
+
+	writer := bytes.NewBuffer(nil)
+	var pointerOffsets []int64
+	pointerOffsets, err = stream.Write(writer)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(pointerOffsets) != 1 {
+		t.Fatalf("Expected 1 pointer offset, got %d", len(pointerOffsets))
+	}
+	if pointerOffsets[0] != 8 {
+		t.Errorf("Expected pointer offset 8, got %d", pointerOffsets[0])
 	}
 
 	// Read data file
-	data, err := os.ReadFile(dataFile.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := writer.Bytes()
+
 	// Block 0: 1, 7 bytes padding, 8-byte pointer to block 1
 	// Block 1: 2
 	// Total 17 bytes
@@ -111,16 +119,4 @@ func TestFinalize(t *testing.T) {
 		t.Errorf("Expected data %v, got %v", expectedData, data)
 	}
 
-	// Read reloc file
-	relocData, err := os.ReadFile(relocFile.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Pointer position is 8
-	expectedReloc := make([]byte, 16)
-	binary.LittleEndian.PutUint64(expectedReloc, 1)
-	binary.LittleEndian.PutUint64(expectedReloc[8:], 8)
-	if !bytes.Equal(relocData, expectedReloc) {
-		t.Errorf("Expected reloc %v, got %v", expectedReloc, relocData)
-	}
 }
