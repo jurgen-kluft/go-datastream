@@ -117,8 +117,9 @@ func TestFinalize(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Pointer position is 8
-	expectedReloc := make([]byte, 8)
-	binary.LittleEndian.PutUint64(expectedReloc, 8)
+	expectedReloc := make([]byte, 16)
+	binary.LittleEndian.PutUint64(expectedReloc, 1)
+	binary.LittleEndian.PutUint64(expectedReloc[8:], 8)
 	if !bytes.Equal(relocData, expectedReloc) {
 		t.Errorf("Expected reloc %v, got %v", expectedReloc, relocData)
 	}

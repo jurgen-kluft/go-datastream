@@ -3,6 +3,7 @@ package datastream
 import (
 	"bytes"
 	"encoding/binary"
+	"hash"
 	"io"
 	"math"
 )
@@ -11,6 +12,7 @@ import (
 
 type Block struct {
 	This      Pointer
+	Canonical int
 	Size      int64
 	Endian    binary.ByteOrder
 	Alignment int
@@ -22,6 +24,7 @@ type Block struct {
 func NewBlock(ptr Pointer, endian binary.ByteOrder, alignment int) *Block {
 	return &Block{
 		This:      ptr,
+		Canonical: -1,
 		Size:      0,
 		Endian:    endian,
 		Alignment: alignment,
@@ -44,6 +47,14 @@ func (d *Block) finalize(offset int64, pointers map[int]int64, ptrOffsets []int6
 		d.Endian.PutUint64(stream[ptr.Offset:(ptr.Offset+8)], uint64(pointers[ptr.Index]))
 	}
 	return ptrOffsets
+}
+
+func (d *Block) hash(hasher hash.Hash) [20]byte {
+	hasher.Reset()
+	hasher.Write(d.Writer.Bytes())
+	var hash [20]byte
+	copy(hash[:], hasher.Sum(nil))
+	return hash
 }
 
 func align(value int64, alignment int) int64 {

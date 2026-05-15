@@ -2,6 +2,7 @@ package datastream
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
 	"os"
@@ -124,34 +125,81 @@ func (d *Stream) Finalize(dataFilename, relocFilename string) error {
 	d.Current.close()
 	d.Stack = d.Stack[:0]
 
-	// resolve all the pointers
-	pointers := make(map[int]int64)
-	goffset := int64(0) // global offset
-	for _, block := range d.Blocks {
-		// goffset must adhere to the alignment of the block
-		if goffset%int64(block.Alignment) != 0 {
-			padding := int64(block.Alignment) - (goffset % int64(block.Alignment))
-			goffset += padding
-		}
-		block.This.Offset = goffset
-		pointers[block.This.Index] = goffset
-		goffset += block.Size
-	}
-
-	// finalize all blocks
+	// Compute the total number of pointer offsets we may use, so we can preallocate the slice
 	countPtrOffsets := 0
 	for _, block := range d.Blocks {
 		countPtrOffsets += len(block.Pointers)
 	}
-
 	ptroffsets := make([]int64, 0, countPtrOffsets)
-	for _, block := range d.Blocks {
-		ptroffsets = block.finalize(block.This.Offset, pointers, ptroffsets)
+
+	// deduplicate block then finalize all blocks, collecting all pointer offsets
+	// Note: When we deduplicate a block, we need to update all pointers that point
+	//       to it, which may cause more deduplications, so we need to
+
+	for true {
+		// resolve all the pointers, taking care of blocks that have been deduplicated
+		pointers := make(map[int]int64)
+
+		// go over all unique blocks and assign offsets, taking care of alignment
+		globalOffset := int64(0) // global offset
+		for _, block := range d.Blocks {
+			if block.Canonical >= 0 {
+				// skip blocks that are inactive due to deduplication
+				continue
+			}
+			if offset, ok := pointers[block.This.Index]; ok {
+				block.This.Offset = offset
+				continue
+			}
+			// block alignment
+			if globalOffset%int64(block.Alignment) != 0 {
+				padding := int64(block.Alignment) - (globalOffset % int64(block.Alignment))
+				globalOffset += padding
+			}
+			block.This.Offset = globalOffset
+			pointers[block.This.Index] = globalOffset
+			globalOffset += block.Size
+		}
+
+		// finalize all blocks
+		ptroffsets = ptroffsets[:0] // reset the slice while keeping the capacity
+		for _, block := range d.Blocks {
+			if block.Canonical >= 0 {
+				// skip blocks that are inactive due to deduplication
+				continue
+			}
+			ptroffsets = block.finalize(block.This.Offset, pointers, ptroffsets)
+		}
+
+		// deduplicate blocks using SHA1
+		dedupNum := 0
+		dedupMap := make(map[[20]byte]*Block)
+		hasher := sha1.New()
+		for _, block := range d.Blocks {
+			if block.Canonical >= 0 {
+				// skip blocks that are inactive due to deduplication
+				continue
+			}
+			hash := block.hash(hasher)
+			if existing, ok := dedupMap[hash]; ok {
+				block.Canonical = existing.This.Index
+				dedupNum++
+			} else {
+				dedupMap[hash] = block
+			}
+		}
+		if dedupNum == 0 {
+			break
+		}
 	}
 
-	// write all blocks to a buffered writer
+	// write all blocks to a buffer, taking care of alignment
 	buffer := bytes.Buffer{}
 	for _, block := range d.Blocks {
+		if block.Canonical >= 0 {
+			// skip blocks that are inactive due to deduplication
+			continue
+		}
 		pos := buffer.Len()
 
 		// check if pos adheres to block alignment, if not write padding
@@ -165,8 +213,7 @@ func (d *Stream) Finalize(dataFilename, relocFilename string) error {
 		block.writeTo(&buffer)
 	}
 
-	// write the buffered data to the file
-	// write all blocks
+	// write the full buffer to the data file
 	datafile, err := os.Create(dataFilename)
 	if err != nil {
 		return err
@@ -177,20 +224,38 @@ func (d *Stream) Finalize(dataFilename, relocFilename string) error {
 		return err
 	}
 
-	// write all pointers
+	// sort the ptroffsets
+	sort.Slice(ptroffsets, func(i, j int) bool {
+		return ptroffsets[i] < ptroffsets[j]
+	})
+
+	relocDataBuffer := make([]byte, (len(ptroffsets)+1)*8) // count + (8 bytes per offset)
+	for i := 0; i <= len(ptroffsets); i++ {
+		o := uint64(0)
+		if i == 0 {
+			o = uint64(len(ptroffsets)) // first 8 bytes is the count of offsets
+		} else {
+			o = uint64(ptroffsets[i-1])
+		}
+		// swap value according to endianness
+		offset := relocDataBuffer[i*8 : (i+1)*8]
+		if d.Endian == binary.BigEndian {
+			binary.BigEndian.PutUint64(offset, o)
+		} else {
+			binary.LittleEndian.PutUint64(offset, o)
+		}
+	}
+
+	// write all pointers to the reloc file
 	relocfile, err := os.Create(relocFilename)
 	if err != nil {
 		return err
 	}
 	defer relocfile.Close()
 
-	// sort the ptroffsets
-	sort.Slice(ptroffsets, func(i, j int) bool {
-		return ptroffsets[i] < ptroffsets[j]
-	})
-
-	for _, o := range ptroffsets {
-		binary.Write(relocfile, d.Endian, o)
+	_, err = relocfile.Write(relocDataBuffer)
+	if err != nil {
+		return err
 	}
 
 	return nil
