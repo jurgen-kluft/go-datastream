@@ -34,8 +34,8 @@ The format is little-endian and uses 32-bit offsets so the final file stays belo
 Composite values are written as headers in the parent block, while the referenced payload is stored in a separate block:
 
 - `string_t` uses an 8-byte header: byte length, rune count, and data offset
-- `array_t` uses an 8-byte header: element size, length, and data offset
-- `map_t` uses a 16-byte header: key size, value size, length, key array offset, and value array offset
+- `array_t` uses an 8-byte header: length(4), and data offset(4)
+- `map_t` uses a 12-byte header: length(4), key array offset(4), and value array offset(4)
 
 Strings are stored as UTF-8 bytes with a trailing null terminator. Arrays and slices are stored as contiguous element data. Maps are stored deterministically by sorting entries by encoded key bytes.
 

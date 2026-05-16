@@ -20,6 +20,7 @@ const (
 	mapHeaderSize    = 16
 	ptrOffsetSize    = 4
 	maxU16Value      = 1<<16 - 1
+	maxU32Value      = 1<<32 - 1
 )
 
 var (
@@ -378,16 +379,12 @@ func (enc *encoder) writeArrayLike(v reflect.Value) error {
 
 	if length == 0 {
 		enc.stream.Align4()
-		enc.stream.WriteU16(uint16(elemLayout.size))
-		enc.stream.WriteU16(0)
+		enc.stream.WriteU32(0)
 		enc.stream.WriteU32(0)
 		return nil
 	}
-	if length > maxU16Value {
+	if length > maxU32Value {
 		return fmt.Errorf("%w: array length %d", errOverflow, length)
-	}
-	if elemLayout.size > maxU16Value {
-		return fmt.Errorf("%w: element size %d", errOverflow, elemLayout.size)
 	}
 
 	childPtr := enc.stream.OpenBlock()
@@ -401,8 +398,7 @@ func (enc *encoder) writeArrayLike(v reflect.Value) error {
 	enc.stream.CloseBlock()
 
 	enc.stream.Align4()
-	enc.stream.WriteU16(uint16(elemLayout.size))
-	enc.stream.WriteU16(uint16(length))
+	enc.stream.WriteU32(uint32(length))
 	enc.stream.WritePtr(childPtr)
 	return nil
 }
@@ -420,8 +416,6 @@ func (enc *encoder) writeMap(v reflect.Value) error {
 
 	if v.IsNil() || v.Len() == 0 {
 		enc.stream.Align4()
-		enc.stream.WriteU16(0)
-		enc.stream.WriteU16(0)
 		enc.stream.WriteU32(0)
 		enc.stream.WriteU32(0)
 		enc.stream.WriteU32(0)
@@ -460,8 +454,6 @@ func (enc *encoder) writeMap(v reflect.Value) error {
 	enc.stream.CloseBlock()
 
 	enc.stream.Align4()
-	enc.stream.WriteU16(uint16(keyLayout.size))
-	enc.stream.WriteU16(uint16(valueLayout.size))
 	enc.stream.WriteU32(uint32(v.Len()))
 	enc.stream.WritePtr(keyBlock)
 	enc.stream.WritePtr(valueBlock)
@@ -728,7 +720,7 @@ func (dec *decoder) readString(dst reflect.Value, offset int) error {
 }
 
 func (dec *decoder) readSlice(dst reflect.Value, offset int) error {
-	_, length, dataOff, err := dec.readArrayHeader(offset)
+	length, dataOff, err := dec.readArrayHeader(offset)
 	if err != nil {
 		return err
 	}
@@ -741,16 +733,9 @@ func (dec *decoder) readSlice(dst reflect.Value, offset int) error {
 }
 
 func (dec *decoder) readArray(dst reflect.Value, offset int) error {
-	elemSize, length, dataOff, err := dec.readArrayHeader(offset)
+	length, dataOff, err := dec.readArrayHeader(offset)
 	if err != nil {
 		return err
-	}
-	expectedElemSize, err := dec.layoutForType(dst.Type().Elem())
-	if err != nil {
-		return err
-	}
-	if elemSize != 0 && int(elemSize) != expectedElemSize.size {
-		return fmt.Errorf("%w: array element size mismatch", errOverflow)
 	}
 	if length == 0 || dataOff == 0 {
 		if dst.Len() != 0 {
@@ -782,23 +767,9 @@ func (dec *decoder) readArrayData(dst reflect.Value, offset int, length int) err
 }
 
 func (dec *decoder) readMap(dst reflect.Value, offset int) error {
-	keySize, valueSize, length, keyOff, valueOff, err := dec.readMapHeader(offset)
+	length, keyOff, valueOff, err := dec.readMapHeader(offset)
 	if err != nil {
 		return err
-	}
-	keyLayout, err := dec.layoutForType(dst.Type().Key())
-	if err != nil {
-		return err
-	}
-	valueLayout, err := dec.layoutForType(dst.Type().Elem())
-	if err != nil {
-		return err
-	}
-	if keySize != 0 && int(keySize) != keyLayout.size {
-		return fmt.Errorf("%w: map key size mismatch", errOverflow)
-	}
-	if valueSize != 0 && int(valueSize) != valueLayout.size {
-		return fmt.Errorf("%w: map value size mismatch", errOverflow)
 	}
 	if length == 0 || keyOff == 0 || valueOff == 0 {
 		dst.Set(reflect.MakeMap(dst.Type()))
@@ -821,14 +792,13 @@ func (dec *decoder) readMap(dst reflect.Value, offset int) error {
 	return nil
 }
 
-func (dec *decoder) readArrayHeader(offset int) (elemSize uint16, length uint16, dataOff uint32, err error) {
+func (dec *decoder) readArrayHeader(offset int) (length uint32, dataOff uint32, err error) {
 	if offset < 0 || offset+arrayHeaderSize > len(dec.data) {
-		return 0, 0, 0, io.ErrUnexpectedEOF
+		return 0, 0, io.ErrUnexpectedEOF
 	}
-	elemSize = binary.LittleEndian.Uint16(dec.data[offset : offset+2])
-	length = binary.LittleEndian.Uint16(dec.data[offset+2 : offset+4])
+	length = binary.LittleEndian.Uint32(dec.data[offset+0 : offset+4])
 	dataOff = binary.LittleEndian.Uint32(dec.data[offset+4 : offset+8])
-	return elemSize, length, dataOff, nil
+	return length, dataOff, nil
 }
 
 func (dec *decoder) readStringHeader(offset int) (byteLen uint16, charLen uint16, dataOff uint32, err error) {
@@ -841,16 +811,14 @@ func (dec *decoder) readStringHeader(offset int) (byteLen uint16, charLen uint16
 	return byteLen, charLen, dataOff, nil
 }
 
-func (dec *decoder) readMapHeader(offset int) (keySize uint16, valueSize uint16, length uint32, keyOff uint32, valueOff uint32, err error) {
+func (dec *decoder) readMapHeader(offset int) (length uint32, keyOff uint32, valueOff uint32, err error) {
 	if offset < 0 || offset+mapHeaderSize > len(dec.data) {
-		return 0, 0, 0, 0, 0, io.ErrUnexpectedEOF
+		return 0, 0, 0, io.ErrUnexpectedEOF
 	}
-	keySize = binary.LittleEndian.Uint16(dec.data[offset : offset+2])
-	valueSize = binary.LittleEndian.Uint16(dec.data[offset+2 : offset+4])
-	length = binary.LittleEndian.Uint32(dec.data[offset+4 : offset+8])
-	keyOff = binary.LittleEndian.Uint32(dec.data[offset+8 : offset+12])
-	valueOff = binary.LittleEndian.Uint32(dec.data[offset+12 : offset+16])
-	return keySize, valueSize, length, keyOff, valueOff, nil
+	length = binary.LittleEndian.Uint32(dec.data[offset+0 : offset+4])
+	keyOff = binary.LittleEndian.Uint32(dec.data[offset+4 : offset+8])
+	valueOff = binary.LittleEndian.Uint32(dec.data[offset+8 : offset+12])
+	return length, keyOff, valueOff, nil
 }
 
 func (dec *decoder) readU8(offset int) (uint8, error) {
