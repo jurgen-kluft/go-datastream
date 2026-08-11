@@ -19,8 +19,11 @@ The package currently focuses on writing streams. It does not provide a matching
 type Stream struct
 type Block struct
 type Pointer struct
+type Context struct
+type Issue struct
+type IssueType int8
 
-func NewStream(pointerSize SizeOfPointer, endian binary.ByteOrder) *Stream
+func NewStream(pointerSize SizeOfPointer, endian binary.ByteOrder, context *Context) *Stream
 
 func (s *Stream) OpenBlock() Pointer
 func (s *Stream) CloseBlock()
@@ -42,11 +45,23 @@ func (s *Stream) WriteFloat(f float32)
 func (s *Stream) WriteDouble(f float64)
 func (s *Stream) WritePtr(ptr Pointer)
 
-func (s *Stream) Finalize() error
-func (s *Stream) Write(w io.Writer) ([]int64, error)
+func (s *Stream) SetVerbose(verbose bool)
+func (s *Stream) Issues() []Issue
+func (s *Stream) HasErrors() bool
+func (s *Stream) HasWarnings() bool
+func (c *Context) Report()
+
+func (s *Stream) Finalize()
+func (s *Stream) Write(w io.Writer) []int64
 ```
 
 `Write` finalizes the stream, writes the packed bytes to an `io.Writer`, and returns the sorted list of pointer offsets that were emitted into the final file.
+
+Errors and warnings are collected in the caller-owned Context instead of being returned immediately. Warnings allow serialization to continue. Errors prevent output when they are known before writing. Enable verbose mode on the Context or Stream to collect informational issues for block layout, pointer resolution, deduplication, and output statistics. Context records every issue and does not deduplicate repeated reports.
+
+`Context.Report` prints errors to stderr and warnings/information to stdout.
+
+Each issue has an `IssueType`, a `Description`, and a `String` helper that formats it as `<Severity>: <Description>`. Pointer diagnostics include the file and line where `WritePtr` was called.
 
 ## Usage
 
@@ -62,7 +77,8 @@ import (
 )
 
 func main() {
-    stream := datastream.NewStream(datastream.SizeOfPointer32, binary.LittleEndian)
+    context := datastream.NewContext()
+    stream := datastream.NewStream(datastream.SizeOfPointer32, binary.LittleEndian, context)
 
     stream.WriteU8(1)
 
@@ -74,13 +90,23 @@ func main() {
     stream.WritePtr(child)
 
     var buf bytes.Buffer
-    offsets, err := stream.Write(&buf)
-    if err != nil {
-        panic(err)
+    stream.SetVerbose(true)
+    offsets := stream.Write(&buf)
+    if stream.HasErrors() {
+        for _, issue := range stream.Issues() {
+            fmt.Println(issue.String())
+        }
+        return
     }
 
     fmt.Println("pointer offsets:", offsets)
     fmt.Printf("bytes: %x\n", buf.Bytes())
+
+    if stream.HasWarnings() {
+        for _, issue := range stream.Issues() {
+            fmt.Println(issue.String())
+        }
+    }
 }
 ```
 

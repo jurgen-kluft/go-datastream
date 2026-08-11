@@ -3,6 +3,7 @@ package datastream
 import (
 	"bytes"
 	"encoding/binary"
+	"math"
 	"testing"
 )
 
@@ -25,7 +26,7 @@ func TestNewBlock(t *testing.T) {
 
 func TestWriteI8(t *testing.T) {
 	block := NewBlock(Pointer{Index: 0, Offset: -1}, SizeOfPointer64, binary.LittleEndian, 8)
-	block.writeI8(42)
+	block.writeI8(NewContext(), 42)
 	data := block.Writer.Bytes()
 	if len(data) != 1 || data[0] != 42 {
 		t.Errorf("Expected [42], got %v", data)
@@ -34,7 +35,7 @@ func TestWriteI8(t *testing.T) {
 
 func TestWriteU16(t *testing.T) {
 	block := NewBlock(Pointer{Index: 0, Offset: -1}, SizeOfPointer64, binary.LittleEndian, 8)
-	block.writeU16(0x1234)
+	block.writeU16(NewContext(), 0x1234)
 	data := block.Writer.Bytes()
 	expected := []byte{0x34, 0x12} // little endian
 	if !bytes.Equal(data, expected) {
@@ -44,8 +45,8 @@ func TestWriteU16(t *testing.T) {
 
 func TestAlign(t *testing.T) {
 	block := NewBlock(Pointer{Index: 0, Offset: -1}, SizeOfPointer64, binary.LittleEndian, 8)
-	block.writeI8(1) // pos=1
-	block.align(4)   // gap=3, write 3 zeros
+	block.writeI8(NewContext(), 1) // pos=1
+	block.align(NewContext(), 4)   // gap=3, write 3 zeros
 	data := block.Writer.Bytes()
 	expected := []byte{1, 0, 0, 0}
 	if !bytes.Equal(data, expected) {
@@ -56,7 +57,7 @@ func TestAlign(t *testing.T) {
 func TestWritePtr(t *testing.T) {
 	block := NewBlock(Pointer{Index: 0, Offset: -1}, SizeOfPointer64, binary.LittleEndian, 8)
 	ptr := Pointer{Index: 1, Offset: 0}
-	block.writePtr(ptr)
+	block.writePtr(NewContext(), ptr, sourceLocation{})
 	data := block.Writer.Bytes()
 	// align 8: pos=0, gap=0
 	// write placeholder offset, but ptr.Offset set to 0
@@ -70,13 +71,33 @@ func TestWritePtr(t *testing.T) {
 	}
 }
 
+func TestWriteNilPtrDoesNotRegisterRelocation(t *testing.T) {
+	for _, pointerSize := range []SizeOfPointer{SizeOfPointer32, SizeOfPointer64} {
+		block := NewBlock(Pointer{Index: 0, Offset: -1}, pointerSize, binary.LittleEndian, int(pointerSize))
+		ctx := NewContext()
+		block.writePtr(ctx, NilPtr(), sourceLocation{})
+
+		if len(block.Pointers) != 0 {
+			t.Fatalf("pointer size %d registered %d relocations for nil", pointerSize, len(block.Pointers))
+		}
+		if got := block.Writer.Bytes(); !bytes.Equal(got, make([]byte, int(pointerSize))) {
+			t.Fatalf("pointer size %d encoded nil as %v", pointerSize, got)
+		}
+		block.finalize(ctx, 0, nil, nil, true)
+		if ctx.HasErrors() {
+			t.Fatalf("pointer size %d failed to finalize nil: %v", pointerSize, ctx.Issues())
+		}
+	}
+}
+
 func TestBlockFinalize(t *testing.T) {
 	block := NewBlock(Pointer{Index: 0, Offset: -1}, SizeOfPointer64, binary.LittleEndian, 8)
 	ptr := Pointer{Index: 1, Offset: 0}
-	block.writePtr(ptr)
+	ctx := NewContext()
+	block.writePtr(ctx, ptr, sourceLocation{})
 	pointers := map[int]int64{1: 100}
 	var ptroffsets []int64
-	ptroffsets = block.finalize(0, pointers, ptroffsets)
+	ptroffsets = block.finalize(ctx, 0, pointers, ptroffsets, true)
 	data := block.Writer.Bytes()
 	// should have updated to 100
 	expected := make([]byte, 8)
@@ -87,4 +108,43 @@ func TestBlockFinalize(t *testing.T) {
 	if len(ptroffsets) != 1 || ptroffsets[0] != 0 {
 		t.Errorf("Expected ptroffsets [0], got %v", ptroffsets)
 	}
+}
+
+func TestBlockFinalizeWritesNegativeRelativePointer(t *testing.T) {
+	block := NewBlock(Pointer{Index: 0, Offset: -1}, SizeOfPointer32, binary.LittleEndian, 4)
+	ctx := NewContext()
+	block.writePtr(ctx, Pointer{Index: 1}, sourceLocation{})
+
+	pointerOffsets := block.finalize(ctx, 100, map[int]int64{1: 80}, nil, true)
+	if got := int32(binary.LittleEndian.Uint32(block.Writer.Bytes())); got != -20 {
+		t.Fatalf("relative pointer = %d, want -20", got)
+	}
+	if len(pointerOffsets) != 1 || pointerOffsets[0] != 100 {
+		t.Fatalf("pointer offsets = %v, want [100]", pointerOffsets)
+	}
+}
+
+func TestBlockFinalizeReportsInvalidPointers(t *testing.T) {
+	t.Run("unresolved target", func(t *testing.T) {
+		block := NewBlock(Pointer{Index: 0, Offset: -1}, SizeOfPointer32, binary.LittleEndian, 4)
+		ctx := NewContext()
+		block.writePtr(ctx, Pointer{Index: 1}, sourceLocation{file: "fixture.go", line: 12})
+		block.finalize(ctx, 0, map[int]int64{}, nil, true)
+		if !ctx.HasWarnings() || ctx.HasErrors() {
+			t.Fatalf("issues = %v, want warning only", ctx.Issues())
+		}
+		if got := binary.LittleEndian.Uint32(block.Writer.Bytes()); got != 0 {
+			t.Fatalf("unresolved pointer = %d, want zero", got)
+		}
+	})
+
+	t.Run("signed displacement overflow", func(t *testing.T) {
+		block := NewBlock(Pointer{Index: 0, Offset: -1}, SizeOfPointer32, binary.LittleEndian, 4)
+		ctx := NewContext()
+		block.writePtr(ctx, Pointer{Index: 1}, sourceLocation{file: "fixture.go", line: 24})
+		block.finalize(ctx, 0, map[int]int64{1: int64(math.MaxInt32) + 1}, nil, true)
+		if !ctx.HasErrors() {
+			t.Fatalf("issues = %v, want overflow error", ctx.Issues())
+		}
+	})
 }

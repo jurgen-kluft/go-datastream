@@ -15,12 +15,16 @@ import (
 )
 
 const (
-	stringHeaderSize = 8
-	arrayHeaderSize  = 8
-	mapHeaderSize    = 16
-	ptrOffsetSize    = 4
-	maxU16Value      = 1<<16 - 1
-	maxU32Value      = 1<<32 - 1
+	stringHeaderSize32 = 4 + 4
+	stringHeaderSize64 = 8 + 4 + 4
+	arrayHeaderSize32  = 4 + 4
+	arrayHeaderSize64  = 8 + 4 + 4
+	mapHeaderSize32    = 4 + 4 + 4
+	mapHeaderSize64    = 8 + 8 + 4 + 4
+	ptrOffsetSize32    = 4
+	ptrOffsetSize64    = 8
+	maxU16Value        = 1<<16 - 1
+	maxU32Value        = 1<<32 - 1
 )
 
 var (
@@ -37,29 +41,89 @@ type layoutInfo struct {
 }
 
 type encoder struct {
-	stream *datastream.Stream
-	stack  map[uintptr]bool
-	layout map[reflect.Type]layoutInfo
+	stream         *datastream.Stream
+	stack          map[uintptr]bool
+	layout         map[reflect.Type]layoutInfo
+	endian         binary.ByteOrder
+	pointerIs64Bit bool
 }
 
 type decoder struct {
-	data   []byte
-	layout map[reflect.Type]layoutInfo
+	data           []byte
+	layout         map[reflect.Type]layoutInfo
+	endian         binary.ByteOrder
+	pointerIs64Bit bool
 }
 
-func WriteToStream(w io.Writer, data interface{}) error {
+type Options struct {
+	PointerIs64Bit bool
+	Endian         binary.ByteOrder
+	Verbose        bool
+}
+
+type CodeStream struct {
+	options Options
+	context *datastream.Context
+}
+
+func NewCodeStream(options Options) *CodeStream {
+	if options.Endian == nil {
+		options.Endian = binary.LittleEndian
+	}
+	return &CodeStream{options: options}
+}
+
+func (cs *CodeStream) Context() *datastream.Context {
+	return cs.context
+}
+
+func (cs *CodeStream) Issues() []datastream.Issue {
+	if cs.context == nil {
+		return nil
+	}
+	return cs.context.Issues()
+}
+
+func (cs *CodeStream) HasErrors() bool {
+	return cs.context != nil && cs.context.HasErrors()
+}
+
+func (cs *CodeStream) HasWarnings() bool {
+	return cs.context != nil && cs.context.HasWarnings()
+}
+
+func (cs *CodeStream) Report() {
+	if cs.context != nil {
+		cs.context.Report()
+	}
+}
+
+func (cs *CodeStream) beginOperation() *datastream.Context {
+	ctx := datastream.NewContext()
+	ctx.SetVerbose(cs.options.Verbose)
+	cs.context = ctx
+	return ctx
+}
+
+func (cs *CodeStream) fail(err error) bool {
+	cs.context.AddError("%v", err)
+	return false
+}
+
+func (cs *CodeStream) WriteStream(w io.Writer, data interface{}) bool {
+	ctx := cs.beginOperation()
 	if data == nil {
-		return errNeedPointer
+		return cs.fail(errNeedPointer)
 	}
 
 	v := reflect.ValueOf(data)
 	if !v.IsValid() {
-		return errNeedPointer
+		return cs.fail(errNeedPointer)
 	}
 
 	for v.Kind() == reflect.Interface {
 		if v.IsNil() {
-			return errNeedPointer
+			return cs.fail(errNeedPointer)
 		}
 		v = v.Elem()
 	}
@@ -71,56 +135,72 @@ func WriteToStream(w io.Writer, data interface{}) error {
 		v = v.Elem()
 	}
 	if !v.IsValid() {
-		return errNeedPointer
+		return cs.fail(errNeedPointer)
 	}
 
-	layout, err := layoutOfType(v.Type())
+	ptrIs64bit := cs.options.PointerIs64Bit
+	ptrSize := datastream.SizeOfPointer32
+	if ptrIs64bit {
+		ptrSize = datastream.SizeOfPointer64
+	}
+	layout, err := layoutOfType(ptrIs64bit, v.Type())
 	if err != nil {
-		return err
+		return cs.fail(err)
 	}
 
-	stream := datastream.NewStream(datastream.SizeOfPointer32, binary.LittleEndian)
+	stream := datastream.NewStream(ptrSize, cs.options.Endian, ctx)
 	stream.Alignment = layout.align
 	stream.Current.Alignment = layout.align
 
 	enc := &encoder{
-		stream: stream,
-		stack:  make(map[uintptr]bool, 32),
-		layout: make(map[reflect.Type]layoutInfo, 64),
+		stream:         stream,
+		stack:          make(map[uintptr]bool, 32),
+		layout:         make(map[reflect.Type]layoutInfo, 64),
+		pointerIs64Bit: ptrIs64bit,
+		endian:         cs.options.Endian,
 	}
 
 	if err := enc.writeValue(v); err != nil {
-		return err
+		return cs.fail(err)
 	}
 
-	_, err = stream.Write(w)
-	return err
+	stream.Write(w)
+	return !ctx.HasErrors()
 }
 
-func ReadFromStream(r io.Reader, data interface{}) error {
+func (cs *CodeStream) ReadStream(r io.Reader, data interface{}) bool {
+	cs.beginOperation()
 	if data == nil {
-		return errNeedPointer
+		return cs.fail(errNeedPointer)
 	}
 
 	dst := reflect.ValueOf(data)
 	if !dst.IsValid() || dst.Kind() != reflect.Ptr || dst.IsNil() {
-		return errNeedPointer
+		return cs.fail(errNeedPointer)
+	}
+	if r == nil {
+		return cs.fail(errors.New("codestream: reader cannot be nil"))
 	}
 
 	raw, err := io.ReadAll(r)
 	if err != nil {
-		return err
+		return cs.fail(err)
 	}
 
 	dec := &decoder{
-		data:   raw,
-		layout: make(map[reflect.Type]layoutInfo),
+		data:           raw,
+		layout:         make(map[reflect.Type]layoutInfo),
+		endian:         cs.options.Endian,
+		pointerIs64Bit: cs.options.PointerIs64Bit,
 	}
 
-	return dec.readValue(dst.Elem(), 0)
+	if err := dec.readValue(dst.Elem(), 0); err != nil {
+		return cs.fail(err)
+	}
+	return true
 }
 
-func layoutOfType(t reflect.Type) (layoutInfo, error) {
+func layoutOfType(ptrIs64bit bool, t reflect.Type) (layoutInfo, error) {
 	switch t.Kind() {
 	case reflect.Bool, reflect.Int8, reflect.Uint8:
 		return layoutInfo{size: 1, align: 1}, nil
@@ -133,21 +213,33 @@ func layoutOfType(t reflect.Type) (layoutInfo, error) {
 	case reflect.Int64, reflect.Uint64, reflect.Float64:
 		return layoutInfo{size: 8, align: 8}, nil
 	case reflect.String:
-		return layoutInfo{size: stringHeaderSize, align: 4}, nil
+		if ptrIs64bit {
+			return layoutInfo{size: stringHeaderSize64, align: 8}, nil
+		}
+		return layoutInfo{size: stringHeaderSize32, align: 4}, nil
 	case reflect.Ptr:
-		return layoutInfo{size: ptrOffsetSize, align: 4}, nil
+		if ptrIs64bit {
+			return layoutInfo{size: ptrOffsetSize64, align: 8}, nil
+		}
+		return layoutInfo{size: ptrOffsetSize32, align: 4}, nil
 	case reflect.Slice, reflect.Array:
-		return layoutInfo{size: arrayHeaderSize, align: 4}, nil
+		if ptrIs64bit {
+			return layoutInfo{size: arrayHeaderSize64, align: 8}, nil
+		}
+		return layoutInfo{size: arrayHeaderSize32, align: 4}, nil
 	case reflect.Map:
-		return layoutInfo{size: mapHeaderSize, align: 4}, nil
+		if ptrIs64bit {
+			return layoutInfo{size: mapHeaderSize64, align: 8}, nil
+		}
+		return layoutInfo{size: mapHeaderSize32, align: 4}, nil
 	case reflect.Struct:
-		return structLayout(t)
+		return structLayout(ptrIs64bit, t)
 	default:
 		return layoutInfo{}, fmt.Errorf("%w: %s", errUnsupported, t.String())
 	}
 }
 
-func structLayout(t reflect.Type) (layoutInfo, error) {
+func structLayout(ptrIs64bit bool, t reflect.Type) (layoutInfo, error) {
 	size := 0
 	align := 1
 	for i := 0; i < t.NumField(); i++ {
@@ -155,7 +247,7 @@ func structLayout(t reflect.Type) (layoutInfo, error) {
 		if field.PkgPath != "" {
 			return layoutInfo{}, fmt.Errorf("%w: %s.%s", errUnexported, t.String(), field.Name)
 		}
-		fieldLayout, err := layoutOfType(field.Type)
+		fieldLayout, err := layoutOfType(ptrIs64bit, field.Type)
 		if err != nil {
 			return layoutInfo{}, err
 		}
@@ -184,23 +276,11 @@ func (enc *encoder) layoutForType(t reflect.Type) (layoutInfo, error) {
 	if info, ok := enc.layout[t]; ok {
 		return info, nil
 	}
-	info, err := layoutOfType(t)
+	info, err := layoutOfType(enc.pointerIs64Bit, t)
 	if err != nil {
 		return layoutInfo{}, err
 	}
 	enc.layout[t] = info
-	return info, nil
-}
-
-func (dec *decoder) layoutForType(t reflect.Type) (layoutInfo, error) {
-	if info, ok := dec.layout[t]; ok {
-		return info, nil
-	}
-	info, err := layoutOfType(t)
-	if err != nil {
-		return layoutInfo{}, err
-	}
-	dec.layout[t] = info
 	return info, nil
 }
 
@@ -214,10 +294,10 @@ func derefRoot(v reflect.Value) reflect.Value {
 	if !v.IsValid() {
 		return v
 	}
-	if v.Kind() == reflect.Pointer && v.IsNil() {
+	if v.Kind() == reflect.Ptr && v.IsNil() {
 		return reflect.New(v.Type().Elem()).Elem()
 	}
-	for v.IsValid() && v.Kind() == reflect.Pointer {
+	for v.IsValid() && v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}
 	return v
@@ -317,7 +397,7 @@ func (enc *encoder) writeStruct(v reflect.Value) error {
 
 func (enc *encoder) writePointer(v reflect.Value) error {
 	if v.IsNil() {
-		enc.stream.WriteU32(0)
+		enc.stream.WritePtr(datastream.NilPtr())
 		return nil
 	}
 
@@ -357,10 +437,11 @@ func (enc *encoder) writeString(s string) error {
 	enc.stream.WriteU8(0)
 	enc.stream.CloseBlock()
 
-	enc.stream.Align4()
+	enc.stream.AlignStruct()
+	enc.stream.WritePtr(childPtr)
 	enc.stream.WriteU16(uint16(len(s)))
 	enc.stream.WriteU16(uint16(runes))
-	enc.stream.WritePtr(childPtr)
+	enc.stream.AlignStruct()
 	return nil
 }
 
@@ -378,9 +459,10 @@ func (enc *encoder) writeArrayLike(v reflect.Value) error {
 	}
 
 	if length == 0 {
-		enc.stream.Align4()
+		enc.stream.AlignStruct()
+		enc.stream.WritePtr(datastream.NilPtr())
 		enc.stream.WriteU32(0)
-		enc.stream.WriteU32(0)
+		enc.stream.AlignStruct()
 		return nil
 	}
 	if length > maxU32Value {
@@ -397,9 +479,10 @@ func (enc *encoder) writeArrayLike(v reflect.Value) error {
 	}
 	enc.stream.CloseBlock()
 
-	enc.stream.Align4()
-	enc.stream.WriteU32(uint32(length))
+	enc.stream.AlignStruct()
 	enc.stream.WritePtr(childPtr)
+	enc.stream.WriteU32(uint32(length))
+	enc.stream.AlignStruct()
 	return nil
 }
 
@@ -415,10 +498,11 @@ func (enc *encoder) writeMap(v reflect.Value) error {
 	}
 
 	if v.IsNil() || v.Len() == 0 {
-		enc.stream.Align4()
+		enc.stream.AlignStruct()
+		enc.stream.WritePtr(datastream.NilPtr())
+		enc.stream.WritePtr(datastream.NilPtr())
 		enc.stream.WriteU32(0)
-		enc.stream.WriteU32(0)
-		enc.stream.WriteU32(0)
+		enc.stream.AlignStruct()
 		return nil
 	}
 
@@ -453,10 +537,11 @@ func (enc *encoder) writeMap(v reflect.Value) error {
 	}
 	enc.stream.CloseBlock()
 
-	enc.stream.Align4()
-	enc.stream.WriteU32(uint32(v.Len()))
+	enc.stream.AlignStruct()
 	enc.stream.WritePtr(keyBlock)
 	enc.stream.WritePtr(valueBlock)
+	enc.stream.WriteU32(uint32(v.Len()))
+	enc.stream.AlignStruct()
 	return nil
 }
 
@@ -547,6 +632,18 @@ func canonicalBytes(v reflect.Value) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("%w: %s", errUnsupported, v.Type().String())
 	}
+}
+
+func (dec *decoder) layoutForType(t reflect.Type) (layoutInfo, error) {
+	if info, ok := dec.layout[t]; ok {
+		return info, nil
+	}
+	info, err := layoutOfType(dec.pointerIs64Bit, t)
+	if err != nil {
+		return layoutInfo{}, err
+	}
+	dec.layout[t] = info
+	return info, nil
 }
 
 func (dec *decoder) readValue(dst reflect.Value, offset int) error {
@@ -676,7 +773,13 @@ func (dec *decoder) readStruct(dst reflect.Value, offset int) error {
 }
 
 func (dec *decoder) readPointer(dst reflect.Value, offset int) error {
-	off, err := dec.readU32(offset)
+	var off int
+	var err error
+	if dec.pointerIs64Bit {
+		off, err = dec.readRelativeOffset64(offset)
+	} else {
+		off, err = dec.readRelativeOffset32(offset)
+	}
 	if err != nil {
 		return err
 	}
@@ -685,7 +788,7 @@ func (dec *decoder) readPointer(dst reflect.Value, offset int) error {
 		return nil
 	}
 	child := reflect.New(dst.Type().Elem())
-	if err := dec.readValue(child.Elem(), int(off)); err != nil {
+	if err := dec.readValue(child.Elem(), off); err != nil {
 		return err
 	}
 	dst.Set(child)
@@ -704,7 +807,7 @@ func (dec *decoder) readString(dst reflect.Value, offset int) error {
 	if dataOff == 0 {
 		return fmt.Errorf("%w: string data offset is zero", errOverflow)
 	}
-	data, err := dec.readBytes(int(dataOff), int(byteLen)+1)
+	data, err := dec.readBytes(dataOff, int(byteLen)+1)
 	if err != nil {
 		return err
 	}
@@ -720,24 +823,48 @@ func (dec *decoder) readString(dst reflect.Value, offset int) error {
 }
 
 func (dec *decoder) readSlice(dst reflect.Value, offset int) error {
-	length, dataOff, err := dec.readArrayHeader(offset)
+	var length uint32
+	var dataOff int
+	var err error
+
+	if dec.pointerIs64Bit {
+		length, dataOff, err = dec.readArrayHeader64(offset)
+	} else {
+		length, dataOff, err = dec.readArrayHeader32(offset)
+	}
+
 	if err != nil {
 		return err
 	}
-	if length == 0 || dataOff == 0 {
+	if (length == 0) != (dataOff == 0) {
+		return fmt.Errorf("%w: slice length and data pointer disagree", errOverflow)
+	}
+	if length == 0 {
 		dst.Set(reflect.MakeSlice(dst.Type(), 0, 0))
 		return nil
 	}
 	dst.Set(reflect.MakeSlice(dst.Type(), int(length), int(length)))
-	return dec.readArrayData(dst, int(dataOff), int(length))
+	return dec.readArrayData(dst, dataOff, int(length))
 }
 
 func (dec *decoder) readArray(dst reflect.Value, offset int) error {
-	length, dataOff, err := dec.readArrayHeader(offset)
+	var length uint32
+	var dataOff int
+	var err error
+
+	if dec.pointerIs64Bit {
+		length, dataOff, err = dec.readArrayHeader64(offset)
+	} else {
+		length, dataOff, err = dec.readArrayHeader32(offset)
+	}
+
 	if err != nil {
 		return err
 	}
-	if length == 0 || dataOff == 0 {
+	if (length == 0) != (dataOff == 0) {
+		return fmt.Errorf("%w: array length and data pointer disagree", errOverflow)
+	}
+	if length == 0 {
 		if dst.Len() != 0 {
 			return fmt.Errorf("%w: array length mismatch", errOverflow)
 		}
@@ -746,7 +873,7 @@ func (dec *decoder) readArray(dst reflect.Value, offset int) error {
 	if int(length) != dst.Len() {
 		return fmt.Errorf("%w: array length mismatch", errOverflow)
 	}
-	return dec.readArrayData(dst, int(dataOff), int(length))
+	return dec.readArrayData(dst, dataOff, int(length))
 }
 
 func (dec *decoder) readArrayData(dst reflect.Value, offset int, length int) error {
@@ -767,21 +894,34 @@ func (dec *decoder) readArrayData(dst reflect.Value, offset int, length int) err
 }
 
 func (dec *decoder) readMap(dst reflect.Value, offset int) error {
-	length, keyOff, valueOff, err := dec.readMapHeader(offset)
+	var length uint32
+	var keyOff int
+	var valueOff int
+	var err error
+
+	if dec.pointerIs64Bit {
+		length, keyOff, valueOff, err = dec.readMapHeader64(offset)
+	} else {
+		length, keyOff, valueOff, err = dec.readMapHeader32(offset)
+	}
+
 	if err != nil {
 		return err
 	}
-	if length == 0 || keyOff == 0 || valueOff == 0 {
+	if (length == 0) != (keyOff == 0 && valueOff == 0) || (keyOff == 0) != (valueOff == 0) {
+		return fmt.Errorf("%w: map length and data pointers disagree", errOverflow)
+	}
+	if length == 0 {
 		dst.Set(reflect.MakeMap(dst.Type()))
 		return nil
 	}
 
 	keys := reflect.MakeSlice(reflect.SliceOf(dst.Type().Key()), int(length), int(length))
-	if err := dec.readArrayData(keys, int(keyOff), int(length)); err != nil {
+	if err := dec.readArrayData(keys, keyOff, int(length)); err != nil {
 		return err
 	}
 	values := reflect.MakeSlice(reflect.SliceOf(dst.Type().Elem()), int(length), int(length))
-	if err := dec.readArrayData(values, int(valueOff), int(length)); err != nil {
+	if err := dec.readArrayData(values, valueOff, int(length)); err != nil {
 		return err
 	}
 
@@ -792,33 +932,106 @@ func (dec *decoder) readMap(dst reflect.Value, offset int) error {
 	return nil
 }
 
-func (dec *decoder) readArrayHeader(offset int) (length uint32, dataOff uint32, err error) {
-	if offset < 0 || offset+arrayHeaderSize > len(dec.data) {
+func (dec *decoder) readArrayHeader32(offset int) (length uint32, dataOff int, err error) {
+	if offset < 0 || offset+arrayHeaderSize32 > len(dec.data) {
 		return 0, 0, io.ErrUnexpectedEOF
 	}
-	length = binary.LittleEndian.Uint32(dec.data[offset+0 : offset+4])
-	dataOff = binary.LittleEndian.Uint32(dec.data[offset+4 : offset+8])
+	dataOff, err = dec.readRelativeOffset32(offset)
+	length = binary.LittleEndian.Uint32(dec.data[offset+4 : offset+8])
 	return length, dataOff, nil
 }
 
-func (dec *decoder) readStringHeader(offset int) (byteLen uint16, charLen uint16, dataOff uint32, err error) {
-	if offset < 0 || offset+stringHeaderSize > len(dec.data) {
+func (dec *decoder) readArrayHeader64(offset int) (length uint32, dataOff int, err error) {
+	if offset < 0 || offset+arrayHeaderSize64 > len(dec.data) {
+		return 0, 0, io.ErrUnexpectedEOF
+	}
+	dataOff, err = dec.readRelativeOffset64(offset)
+	length = binary.LittleEndian.Uint32(dec.data[offset+8 : offset+12])
+	return length, dataOff, nil
+}
+
+func (dec *decoder) readStringHeader(offset int) (byteLen uint16, charLen uint16, dataOff int, err error) {
+	headerSize := stringHeaderSize32
+	lengthOffset := offset + 4
+	if dec.pointerIs64Bit {
+		headerSize = stringHeaderSize64
+		lengthOffset = offset + 8
+	}
+	if offset < 0 || offset+headerSize > len(dec.data) {
 		return 0, 0, 0, io.ErrUnexpectedEOF
 	}
-	byteLen = binary.LittleEndian.Uint16(dec.data[offset : offset+2])
-	charLen = binary.LittleEndian.Uint16(dec.data[offset+2 : offset+4])
-	dataOff = binary.LittleEndian.Uint32(dec.data[offset+4 : offset+8])
+	if dec.pointerIs64Bit {
+		dataOff, err = dec.readRelativeOffset64(offset)
+	} else {
+		dataOff, err = dec.readRelativeOffset32(offset)
+	}
+	byteLen = binary.LittleEndian.Uint16(dec.data[lengthOffset : lengthOffset+2])
+	charLen = binary.LittleEndian.Uint16(dec.data[lengthOffset+2 : lengthOffset+4])
 	return byteLen, charLen, dataOff, nil
 }
 
-func (dec *decoder) readMapHeader(offset int) (length uint32, keyOff uint32, valueOff uint32, err error) {
-	if offset < 0 || offset+mapHeaderSize > len(dec.data) {
+func (dec *decoder) readMapHeader32(offset int) (length uint32, keyOff int, valueOff int, err error) {
+	if offset < 0 || offset+mapHeaderSize32 > len(dec.data) {
 		return 0, 0, 0, io.ErrUnexpectedEOF
 	}
-	length = binary.LittleEndian.Uint32(dec.data[offset+0 : offset+4])
-	keyOff = binary.LittleEndian.Uint32(dec.data[offset+4 : offset+8])
-	valueOff = binary.LittleEndian.Uint32(dec.data[offset+8 : offset+12])
+	keyOff, err = dec.readRelativeOffset32(offset)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	valueOff, err = dec.readRelativeOffset32(offset + 4)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	length = binary.LittleEndian.Uint32(dec.data[offset+8 : offset+12])
 	return length, keyOff, valueOff, nil
+}
+
+func (dec *decoder) readMapHeader64(offset int) (length uint32, keyOff int, valueOff int, err error) {
+	if offset < 0 || offset+mapHeaderSize64 > len(dec.data) {
+		return 0, 0, 0, io.ErrUnexpectedEOF
+	}
+	keyOff, err = dec.readRelativeOffset64(offset)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	valueOff, err = dec.readRelativeOffset64(offset + 8)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	length = binary.LittleEndian.Uint32(dec.data[offset+16 : offset+20])
+	return length, keyOff, valueOff, nil
+}
+
+func (dec *decoder) readRelativeOffset32(fieldOffset int) (int, error) {
+	raw, err := dec.readU32(fieldOffset)
+	if err != nil {
+		return 0, err
+	}
+	displacement := int32(raw)
+	if displacement == 0 {
+		return 0, nil
+	}
+	target := int64(fieldOffset) + int64(displacement)
+	if target < 0 || target > int64(len(dec.data)) {
+		return 0, fmt.Errorf("%w: relative pointer target %d is outside stream", errOverflow, target)
+	}
+	return int(target), nil
+}
+
+func (dec *decoder) readRelativeOffset64(fieldOffset int) (int, error) {
+	raw, err := dec.readU64(fieldOffset)
+	if err != nil {
+		return 0, err
+	}
+	displacement := int64(raw)
+	if displacement == 0 {
+		return 0, nil
+	}
+	target := int64(fieldOffset) + displacement
+	if target < 0 || target > int64(len(dec.data)) {
+		return 0, fmt.Errorf("%w: relative pointer target %d is outside stream", errOverflow, target)
+	}
+	return int(target), nil
 }
 
 func (dec *decoder) readU8(offset int) (uint8, error) {
