@@ -141,67 +141,67 @@ func (str *Stream) Align8() {
 
 func (str *Stream) WriteBytes(data []byte) {
 	if block := str.activeBlock("writing bytes"); block != nil {
-		block.writeBytes(str.context, data)
+		block.writeBytes(data)
 	}
 }
 
 func (str *Stream) WriteI8(i int8) {
 	if block := str.activeBlock("writing int8"); block != nil {
-		block.writeI8(str.context, i)
+		block.writeI8(i)
 	}
 }
 
 func (str *Stream) WriteI16(i int16) {
 	if block := str.activeBlock("writing int16"); block != nil {
-		block.writeI16(str.context, i)
+		block.writeI16(i)
 	}
 }
 
 func (str *Stream) WriteI32(i int32) {
 	if block := str.activeBlock("writing int32"); block != nil {
-		block.writeI32(str.context, i)
+		block.writeI32(i)
 	}
 }
 
 func (str *Stream) WriteI64(i int64) {
 	if block := str.activeBlock("writing int64"); block != nil {
-		block.writeI64(str.context, i)
+		block.writeI64(i)
 	}
 }
 
 func (str *Stream) WriteU8(i uint8) {
 	if block := str.activeBlock("writing uint8"); block != nil {
-		block.writeU8(str.context, i)
+		block.writeU8(i)
 	}
 }
 
 func (str *Stream) WriteU16(i uint16) {
 	if block := str.activeBlock("writing uint16"); block != nil {
-		block.writeU16(str.context, i)
+		block.writeU16(i)
 	}
 }
 
 func (str *Stream) WriteU32(i uint32) {
 	if block := str.activeBlock("writing uint32"); block != nil {
-		block.writeU32(str.context, i)
+		block.writeU32(i)
 	}
 }
 
 func (str *Stream) WriteU64(i uint64) {
 	if block := str.activeBlock("writing uint64"); block != nil {
-		block.writeU64(str.context, i)
+		block.writeU64(i)
 	}
 }
 
 func (str *Stream) WriteFloat(f float32) {
 	if block := str.activeBlock("writing float32"); block != nil {
-		block.writeF32(str.context, f)
+		block.writeF32(f)
 	}
 }
 
 func (str *Stream) WriteDouble(f float64) {
 	if block := str.activeBlock("writing float64"); block != nil {
-		block.writeF64(str.context, f)
+		block.writeF64(f)
 	}
 }
 
@@ -215,7 +215,7 @@ func (str *Stream) WritePtr(ptr Pointer) {
 		file = "unknown"
 		line = 0
 	}
-	block.writePtr(str.context, ptr, sourceLocation{file: file, line: line})
+	block.writePtr(ptr, sourceLocation{file: file, line: line})
 }
 
 func (str *Stream) Finalize() {
@@ -322,7 +322,7 @@ func (str *Stream) Write(w io.Writer) []int64 {
 				// skip blocks that are inactive due to deduplication
 				continue
 			}
-			hash := block.hash(str.context, hasher)
+			hash := block.hash(hasher)
 			if existing, ok := dedupMap[hash]; ok {
 				block.Canonical = existing
 				dedupNum++

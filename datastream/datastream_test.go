@@ -175,7 +175,7 @@ func TestUnresolvedPointerCreatesWarningAtWritePtrCaller(t *testing.T) {
 
 func TestPointerOverflowCollectsErrorAndSuppressesOutput(t *testing.T) {
 	stream := NewStream(SizeOfPointer32, binary.LittleEndian, NewContext())
-	stream.Current.writePtr(stream.context, Pointer{Index: 1}, sourceLocation{file: "fixture.go", line: 10})
+	stream.Current.writePtr(Pointer{Index: 1}, sourceLocation{file: "fixture.go", line: 10})
 	stream.Finalize()
 	stream.Blocks[0].Size = int64(math.MaxInt32) + 8
 	stream.Blocks = append(stream.Blocks, NewBlock(Pointer{Index: 1, Offset: -1}, SizeOfPointer32, binary.LittleEndian, 4))

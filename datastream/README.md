@@ -11,8 +11,6 @@ It is designed for formats that need to lay out structured data in memory-friend
 - aligns blocks and field boundaries as needed
 - deduplicates identical blocks using SHA1 hashing before writing
 
-The package currently focuses on writing streams. It does not provide a matching reader.
-
 ## API
 
 ```go
@@ -134,7 +132,7 @@ This is especially useful for repeated strings, arrays, and maps.
 
 ## Notes
 
-- The package uses little-endian encoding for all multi-byte values.
+- The package uses endian encoding for all multi-byte values.
 - The writer is intended for deterministic binary output.
 - The stream must be finalized before writing it out.
 

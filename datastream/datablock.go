@@ -109,7 +109,7 @@ func (d *Block) finalize(ctx *Context, offset int64, pointers map[int]int64, poi
 	return pointerOffsets
 }
 
-func (d *Block) hash(ctx *Context, hasher hash.Hash) [20]byte {
+func (d *Block) hash(hasher hash.Hash) [20]byte {
 	hasher.Reset()
 	hasher.Write(d.Writer.Bytes())
 	var hash [20]byte
@@ -147,63 +147,63 @@ func (d *Block) align(ctx *Context, alignment int) {
 		if chunk > gap {
 			chunk = gap
 		}
-		d.writeBytes(ctx, d.PutBuffer[:chunk])
+		d.writeBytes(d.PutBuffer[:chunk])
 		gap -= chunk
 	}
 	ctx.AddInformation("added alignment padding to block %d at offset %d for alignment %d", d.This.Index, pos, alignment)
 }
 
-func (d *Block) writeBytes(ctx *Context, b []byte) {
+func (d *Block) writeBytes(b []byte) {
 	d.Writer.Write(b)
 }
 
-func (d *Block) writeI8(ctx *Context, i int8) {
+func (d *Block) writeI8(i int8) {
 	d.Writer.WriteByte(byte(i))
 }
 
-func (d *Block) writeI16(ctx *Context, i int16) {
+func (d *Block) writeI16(i int16) {
 	d.Endian.PutUint16(d.PutBuffer, uint16(i))
-	d.writeBytes(ctx, d.PutBuffer[:2])
+	d.writeBytes(d.PutBuffer[:2])
 }
 
-func (d *Block) writeI32(ctx *Context, i int32) {
+func (d *Block) writeI32(i int32) {
 	d.Endian.PutUint32(d.PutBuffer, uint32(i))
-	d.writeBytes(ctx, d.PutBuffer[:4])
+	d.writeBytes(d.PutBuffer[:4])
 }
 
-func (d *Block) writeI64(ctx *Context, i int64) {
+func (d *Block) writeI64(i int64) {
 	d.Endian.PutUint64(d.PutBuffer, uint64(i))
-	d.writeBytes(ctx, d.PutBuffer[:8])
+	d.writeBytes(d.PutBuffer[:8])
 }
 
-func (d *Block) writeU8(ctx *Context, i uint8) {
+func (d *Block) writeU8(i uint8) {
 	d.Writer.WriteByte(byte(i))
 }
 
-func (d *Block) writeU16(ctx *Context, i uint16) {
+func (d *Block) writeU16(i uint16) {
 	d.Endian.PutUint16(d.PutBuffer, i)
-	d.writeBytes(ctx, d.PutBuffer[:2])
+	d.writeBytes(d.PutBuffer[:2])
 }
 
-func (d *Block) writeU32(ctx *Context, i uint32) {
+func (d *Block) writeU32(i uint32) {
 	d.Endian.PutUint32(d.PutBuffer, i)
-	d.writeBytes(ctx, d.PutBuffer[:4])
+	d.writeBytes(d.PutBuffer[:4])
 }
 
-func (d *Block) writeU64(ctx *Context, i uint64) {
+func (d *Block) writeU64(i uint64) {
 	d.Endian.PutUint64(d.PutBuffer, i)
-	d.writeBytes(ctx, d.PutBuffer[:8])
+	d.writeBytes(d.PutBuffer[:8])
 }
 
-func (d *Block) writeF32(ctx *Context, f float32) {
-	d.writeU32(ctx, math.Float32bits(f))
+func (d *Block) writeF32(f float32) {
+	d.writeU32(math.Float32bits(f))
 }
 
-func (d *Block) writeF64(ctx *Context, f float64) {
-	d.writeU64(ctx, math.Float64bits(f))
+func (d *Block) writeF64(f float64) {
+	d.writeU64(math.Float64bits(f))
 }
 
-func (d *Block) writePtr(ctx *Context, ptr Pointer, source sourceLocation) {
+func (d *Block) writePtr(ptr Pointer, source sourceLocation) {
 	ptr.Offset = int64(d.Writer.Len())
 	if ptr.Index >= 0 {
 		d.Pointers = append(d.Pointers, ptr)
@@ -211,9 +211,9 @@ func (d *Block) writePtr(ctx *Context, ptr Pointer, source sourceLocation) {
 	}
 	if d.SizeOfPointer == SizeOfPointer32 {
 		d.Endian.PutUint32(d.PutBuffer, 0)
-		d.writeBytes(ctx, d.PutBuffer[:4])
+		d.writeBytes(d.PutBuffer[:4])
 	} else {
 		d.Endian.PutUint64(d.PutBuffer, 0)
-		d.writeBytes(ctx, d.PutBuffer[:8])
+		d.writeBytes(d.PutBuffer[:8])
 	}
 }
